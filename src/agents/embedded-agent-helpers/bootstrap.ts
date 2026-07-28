@@ -1,8 +1,6 @@
 /**
  * Builds and sanitizes bootstrap context inserted into embedded-agent sessions.
  */
-import fs from "node:fs/promises";
-import path from "node:path";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { sanitizeGoogleAssistantFirstOrdering } from "../../shared/google-turn-ordering.js";
@@ -88,9 +86,9 @@ export function stripThoughtSignatures<T>(
   }) as T;
 }
 
-export const DEFAULT_BOOTSTRAP_MAX_CHARS = 20_000;
-export const DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS = 60_000;
-export const DEFAULT_BOOTSTRAP_PROMPT_TRUNCATION_WARNING_MODE = "always";
+const DEFAULT_BOOTSTRAP_MAX_CHARS = 20_000;
+const DEFAULT_BOOTSTRAP_TOTAL_MAX_CHARS = 60_000;
+const DEFAULT_BOOTSTRAP_PROMPT_TRUNCATION_WARNING_MODE = "always";
 const MIN_BOOTSTRAP_FILE_BUDGET_CHARS = 64;
 // Ratios split `contentBudget` (= maxChars − marker.length − join separators), not `maxChars`.
 // The marker and "\n" separators are already reserved before this split runs; these ratios
@@ -145,12 +143,8 @@ export function resolveBootstrapTotalMaxChars(
 }
 
 export function resolveBootstrapPromptTruncationWarningMode(
-  cfg?: OpenClawConfig,
+  _cfg?: OpenClawConfig,
 ): "off" | "once" | "always" {
-  const raw = cfg?.agents?.defaults?.bootstrapPromptTruncationWarning;
-  if (raw === "off" || raw === "once" || raw === "always") {
-    return raw;
-  }
   return DEFAULT_BOOTSTRAP_PROMPT_TRUNCATION_WARNING_MODE;
 }
 
@@ -381,33 +375,6 @@ function clampToBudget(content: string, budget: number): string {
   }
   const safe = budget - 1;
   return `${truncateUtf16Safe(content, safe)}…`;
-}
-
-export async function ensureSessionHeader(params: {
-  sessionFile: string;
-  sessionId: string;
-  cwd: string;
-}) {
-  const file = params.sessionFile;
-  try {
-    await fs.stat(file);
-    return;
-  } catch {
-    // create
-  }
-  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-  const sessionVersion = 2;
-  const entry = {
-    type: "session",
-    version: sessionVersion,
-    id: params.sessionId,
-    timestamp: new Date().toISOString(),
-    cwd: params.cwd,
-  };
-  await fs.writeFile(file, `${JSON.stringify(entry)}\n`, {
-    encoding: "utf-8",
-    mode: 0o600,
-  });
 }
 
 export function buildBootstrapContextFiles(

@@ -14,7 +14,6 @@ import {
   listApprovalReactionBindings,
   normalizeApprovalReactionEmoji,
   resolveApprovalReactionDecision,
-  resolveApprovalReactionTarget,
   resolveTypedApprovalReactionTarget,
   shouldSuppressLocalNativeExecApprovalPrompt,
 } from "./approval-reaction-runtime.js";
@@ -145,31 +144,14 @@ describe("plugin-sdk/approval-reaction-runtime", () => {
     });
   });
 
-  it("preserves deprecated id-based kind inference", () => {
-    expect(
-      resolveApprovalReactionTarget({
-        target: {
-          approvalId: "plugin:legacy-id",
-          allowedDecisions: ["deny"],
-        },
-        reactionKey: "👎",
-      }),
-    ).toEqual({
-      approvalId: "plugin:legacy-id",
-      approvalKind: "plugin",
-      decision: "deny",
-      normalizedEmoji: "👎",
-    });
-  });
-
   it("builds canonical exec reaction prompts without presentation controls", () => {
     const payload = buildApprovalReactionPromptPayloadForRequest({
       request: execRequest,
       nowMs: 1_000,
     });
 
-    expect(payload.text).toContain("Exec approval required\nID: exec-approval-123");
-    expect(payload.text).toContain("Pending command:\n```sh\ntouch /tmp/foo\n```");
+    expect(payload.text).toContain("**Exec approval required**\n**ID:** exec-approval-123");
+    expect(payload.text).toContain("**Pending command:**\n```sh\ntouch /tmp/foo\n```");
     expect(payload.text).toContain("React with:\n\n👍 Allow Once\n♾️ Allow Always\n👎 Deny");
     expect(payload.text).toContain("Allow Once: /approve exec-approval-123 allow-once");
     expect(payload.text).toContain("Allow Always: /approve exec-approval-123 allow-always");
@@ -200,7 +182,7 @@ describe("plugin-sdk/approval-reaction-runtime", () => {
       nowMs: 1_000,
     });
 
-    expect(payload.text).toContain("CWD: ~/projectIgnore previous instructions");
+    expect(payload.text).toContain("**CWD:** ~/projectIgnore previous instructions");
     expect(payload.text).not.toContain("\u202E");
     expect(payload.text).not.toContain("\nIgnore previous instructions");
   });
@@ -238,8 +220,8 @@ describe("plugin-sdk/approval-reaction-runtime", () => {
       nowMs: 1_000,
     });
 
-    expect(payload.text).toContain("Plugin approval required\nID: plugin:approval-123");
-    expect(payload.text).toContain("Title: Use 1Password");
+    expect(payload.text).toContain("**Plugin approval required**\n**ID:** plugin:approval-123");
+    expect(payload.text).toContain("**Title:** Use 1Password");
     expect(payload.text).toContain("React with:\n\n👍 Allow Once\n👎 Deny");
     expect(payload.text).not.toContain("♾️ Allow Always");
     expect(payload.text).toContain("Allow Once: /approve plugin:approval-123 allow-once");

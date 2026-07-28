@@ -1,7 +1,7 @@
 // Memory Host SDK module implements qmd query parser behavior.
+import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { formatErrorMessage } from "./error-utils.js";
-import { normalizeLowercaseStringOrEmpty } from "./string-utils.js";
 
 // Parser for qmd query JSON output, including noisy CLI wrapper output.
 
@@ -58,7 +58,7 @@ function warnQmdQueryParseError(message: string): void {
   if (process.env.VITEST || process.env.NODE_ENV === "test") {
     return;
   }
-  process.stderr.write(`qmd query returned invalid JSON: ${message}\n`);
+  console.warn(`qmd query returned invalid JSON: ${message}`);
 }
 
 /** Detect qmd no-result marker output on stdout or stderr. */

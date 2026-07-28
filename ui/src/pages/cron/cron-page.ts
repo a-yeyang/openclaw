@@ -2,26 +2,25 @@ import { consume } from "@lit/context";
 import { html } from "lit";
 import { state } from "lit/decorators.js";
 import type { AgentsListResult, CronJob } from "../../api/types.ts";
-import { subtitleForRoute, titleForRoute } from "../../app-navigation.ts";
+import { titleForRoute } from "../../app-navigation.ts";
 import { applicationContext, type ApplicationContext } from "../../app/context.ts";
+import { renderAgentScopeControl } from "../../components/agent-scope-control.ts";
 import { renderSettingsWorkspace } from "../../components/settings-workspace.ts";
-import { currentConfigObject } from "../../lib/config/index.ts";
 import {
   addCronJob,
   cancelCronEdit,
   createInitialCronState,
-  getCronJobPayload,
   getVisibleCronJobs,
   hasCronFormErrors,
   loadCronFailingCount,
   loadCronJobsPage,
   loadCronModelSuggestions,
   loadCronRuns,
+  loadCronScopeStats,
   loadCronStatus,
   loadMoreCronRuns,
   normalizeCronFormState,
   removeCronJob,
-  resolveConfiguredCronModelSuggestions,
   runCronJob,
   startCronClone,
   startCronEdit,
@@ -33,27 +32,18 @@ import {
   type CronModelSuggestionsState,
   type CronState,
 } from "../../lib/cron/index.ts";
-import { searchForSession } from "../../lib/sessions/index.ts";
-import { sortUniqueStrings } from "../../lib/string-coerce.ts";
+import {
+  resolveSessionNavigationAgentId,
+  sessionNavigationTarget,
+} from "../../lib/sessions/route-navigation.ts";
 import { OpenClawLightDomElement } from "../../lit/openclaw-element.ts";
 import { SubscriptionsController } from "../../lit/subscriptions-controller.ts";
+import {
+  buildCronSuggestions,
+  THINKING_SUGGESTIONS,
+  TIMEZONE_SUGGESTIONS,
+} from "./form-suggestions.ts";
 import { renderCron, type CronDetailTab, type CronListTab } from "./view.ts";
-
-const THINKING_SUGGESTIONS = ["off", "minimal", "low", "medium", "high"];
-const TIMEZONE_SUGGESTIONS = [
-  "UTC",
-  "America/Los_Angeles",
-  "America/Denver",
-  "America/Chicago",
-  "America/New_York",
-  "Europe/London",
-  "Europe/Berlin",
-  "Asia/Tokyo",
-];
-
-function unique(values: string[]): string[] {
-  return sortUniqueStrings(values.map((value) => value.trim()).filter(Boolean));
-}
 
 class CronPage extends OpenClawLightDomElement {
   @consume({ context: applicationContext, subscribe: true })
@@ -82,6 +72,23 @@ class CronPage extends OpenClawLightDomElement {
       (runtimeConfig, notify) => runtimeConfig.subscribe(notify),
     )
     .effect(
+      () => this.context?.agentSelection,
+      (agentSelection) =>
+        agentSelection.subscribe((selection) => {
+          if (this.cron.cronAgentId === selection.scopeId) {
+            return;
+          }
+          // Replace the mutable request state so responses started for the old
+          // scope cannot populate the newly selected agent's page.
+          this.resetGatewayState(this.context.gateway.snapshot);
+          this.cron.cronAgentId = selection.scopeId;
+          this.listTab = "tasks";
+          this.detailTab = "settings";
+          this.ensureInitialData();
+          this.requestUpdate();
+        }),
+    )
+    .effect(
       () => this.context?.gateway,
       (gateway) => {
         const sourceChanged = this.gatewaySource !== undefined && this.gatewaySource !== gateway;
@@ -102,7 +109,7 @@ class CronPage extends OpenClawLightDomElement {
         gateway.subscribeEvents((event) => {
           if (
             this.gatewaySource === gateway &&
-            gateway.snapshot.connected &&
+            gateway.snapshot.phase === "connected" &&
             gateway.snapshot.client &&
             event.event === "cron"
           ) {
@@ -118,9 +125,14 @@ class CronPage extends OpenClawLightDomElement {
     super.disconnectedCallback();
   }
 
-  private resetGatewayState(snapshot: Partial<Pick<CronState, "client" | "connected">> = {}) {
-    this.cron = createInitialCronState(snapshot);
-    this.agentsList = snapshot.connected ? this.context.agents.state.agentsList : null;
+  private resetGatewayState(snapshot?: ApplicationContext["gateway"]["snapshot"]) {
+    const connected = snapshot?.phase === "connected";
+    this.cron = createInitialCronState({
+      client: snapshot?.client ?? null,
+      connected,
+    });
+    this.cron.cronAgentId = this.context.agentSelection.state.scopeId;
+    this.agentsList = connected ? this.context.agents.state.agentsList : null;
     this.cronModelSuggestions = [];
     this.modelSuggestionsState = null;
   }
@@ -132,7 +144,7 @@ class CronPage extends OpenClawLightDomElement {
     if (
       sourceChanged ||
       this.cron.client !== snapshot.client ||
-      this.cron.connected !== snapshot.connected
+      this.cron.connected !== (snapshot.phase === "connected")
     ) {
       // Each connection epoch owns a fresh mutable state object. In-flight work
       // can finish against the old object without leaking into the next session.
@@ -201,6 +213,7 @@ class CronPage extends OpenClawLightDomElement {
     await Promise.all([
       this.runCronTask((current) => loadCronStatus(current)),
       this.runCronTask((current) => loadCronFailingCount(current)),
+      this.runCronTask((current) => loadCronScopeStats(current)),
       this.runCronTask((current) =>
         loadCronJobsPage(current, { tableFilters: options.tableFilters }),
       ),
@@ -320,66 +333,36 @@ class CronPage extends OpenClawLightDomElement {
     });
   }
 
-  private suggestions() {
-    const channels = this.context.channels.state;
-    const configValue = currentConfigObject(this.context.runtimeConfig.state);
-    const channel = this.cron.cronForm.deliveryChannel.trim() || "last";
-    const agentSuggestions = unique([
-      ...(this.agentsList?.agents.map((entry) => entry.id.trim()) ?? []),
-      ...this.cron.cronJobs.map((job) =>
-        typeof job.agentId === "string" ? job.agentId.trim() : "",
-      ),
-    ]);
-    const modelSuggestions = unique([
-      ...this.cronModelSuggestions,
-      ...resolveConfiguredCronModelSuggestions(configValue),
-      ...this.cron.cronJobs.map((job) => {
-        const payload = getCronJobPayload(job);
-        return payload?.kind === "agentTurn" && typeof payload.model === "string"
-          ? payload.model.trim()
-          : "";
-      }),
-    ]);
-    const jobTargets = this.cron.cronJobs
-      .map((job) => (typeof job.delivery?.to === "string" ? job.delivery.to.trim() : ""))
-      .filter(Boolean);
-    const accountTargets = (
-      channel === "last"
-        ? Object.values(channels.channelsSnapshot?.channelAccounts ?? {}).flat()
-        : (channels.channelsSnapshot?.channelAccounts?.[channel] ?? [])
-    )
-      .flatMap((account) => [account.accountId, account.name])
-      .filter((value): value is string => typeof value === "string")
-      .map((value) => value.trim())
-      .filter(Boolean);
-    const deliveryTargets = unique([...jobTargets, ...accountTargets]);
-    return {
-      agentSuggestions,
-      modelSuggestions,
-      accountTargets,
-      deliveryToSuggestions:
-        this.cron.cronForm.deliveryMode === "webhook"
-          ? deliveryTargets.filter((value) => /^https?:\/\//i.test(value))
-          : deliveryTargets,
-    };
-  }
-
   override render() {
     const channels = this.context.channels.state;
-    const suggestions = this.suggestions();
+    const fallbackAgentId = resolveSessionNavigationAgentId(this.context);
+    const suggestions = buildCronSuggestions({
+      channels,
+      runtimeConfig: this.context.runtimeConfig.state,
+      cron: this.cron,
+      agentsList: this.agentsList,
+      modelSuggestions: this.cronModelSuggestions,
+    });
     return html`
       <section class="content-header">
         <div>
           <div class="page-title">${titleForRoute("cron")}</div>
-          <div class="page-sub">${subtitleForRoute("cron")}</div>
         </div>
+        ${renderAgentScopeControl({
+          agents: this.agentsList?.agents ?? [],
+          selection: this.context.agentSelection,
+        })}
       </section>
       ${renderSettingsWorkspace(
         renderCron({
           basePath: this.context.basePath,
+          agentId: fallbackAgentId,
           loading: this.cron.cronLoading,
           status: this.cron.cronStatus,
           failingCount: this.cron.cronFailingCount,
+          agentScoped: this.cron.cronAgentId !== null,
+          scopedTotal: this.cron.cronScopedTotal,
+          scopedNextWakeAtMs: this.cron.cronScopedNextWakeAtMs,
           jobs: getVisibleCronJobs(this.cron),
           jobsLoadingMore: this.cron.cronJobsLoadingMore,
           jobsTotal: this.cron.cronJobsTotal,
@@ -484,7 +467,14 @@ class CronPage extends OpenClawLightDomElement {
               );
             }),
           onNavigateToChat: (sessionKey) =>
-            this.context.navigate("chat", { search: searchForSession(sessionKey) }),
+            this.context.navigate(
+              "chat",
+              sessionNavigationTarget({
+                context: this.context,
+                face: "chat",
+                sessionKey,
+              }).options,
+            ),
         }),
       )}
     `;

@@ -15,6 +15,7 @@ import {
   readProcessTreeCpuMs,
   requestProbeStatus,
 } from "./lib/gateway-bench-probes.ts";
+import { selectSlowStartupTraceDurations } from "./lib/gateway-startup-trace-ranking.js";
 
 type GatewayBenchCase = {
   config: Record<string, unknown>;
@@ -23,6 +24,7 @@ type GatewayBenchCase = {
   name: string;
   pluginActivationOnStartup?: boolean;
   pluginCount?: number;
+  providerCatalogStallMs?: number;
 };
 
 type ProbeResult = {
@@ -140,6 +142,9 @@ const BASE_CONFIG = {
   },
 } satisfies Record<string, unknown>;
 
+const STALLED_CATALOG_PROVIDER_ID = "bench-catalog-stall";
+const STALLED_CATALOG_MODEL_ID = "bench-model";
+
 const GATEWAY_CASES: readonly GatewayBenchCase[] = [
   {
     id: "default",
@@ -151,6 +156,25 @@ const GATEWAY_CASES: readonly GatewayBenchCase[] = [
     name: "gateway, skip channels",
     env: { OPENCLAW_SKIP_CHANNELS: "1" },
     config: BASE_CONFIG,
+  },
+  {
+    id: "preparedRuntimeCatalogStall",
+    name: "gateway, prepared runtime with CPU-stalling live catalog",
+    env: { OPENCLAW_SKIP_CHANNELS: "1" },
+    providerCatalogStallMs: 2_000,
+    config: {
+      ...BASE_CONFIG,
+      agents: {
+        defaults: {
+          model: { primary: `${STALLED_CATALOG_PROVIDER_ID}/${STALLED_CATALOG_MODEL_ID}` },
+          models: {
+            [`${STALLED_CATALOG_PROVIDER_ID}/${STALLED_CATALOG_MODEL_ID}`]: {
+              agentRuntime: { id: "openclaw" },
+            },
+          },
+        },
+      },
+    },
   },
   {
     id: "oneInternalHook",
@@ -540,7 +564,7 @@ function formatStats(stats: SummaryStats | null): string {
   return `p50=${formatMs(stats.p50)} avg=${formatMs(stats.avg)} min=${formatMs(stats.min)} max=${formatMs(stats.max)}`;
 }
 
-function formatMemoryStats(stats: SummaryStats | null): string {
+function formatMemoryStats(stats: SummaryStats | null | undefined): string {
   if (!stats) {
     return "n/a";
   }
@@ -552,13 +576,6 @@ function formatRatioStats(stats: SummaryStats | null): string {
     return "n/a";
   }
   return `p50=${formatRatio(stats.p50)} avg=${formatRatio(stats.avg)} min=${formatRatio(stats.min)} max=${formatRatio(stats.max)}`;
-}
-
-function getStartupTraceStat(
-  startupTrace: Record<string, SummaryStats>,
-  key: string,
-): SummaryStats | null {
-  return startupTrace[key] ?? null;
 }
 
 async function waitForProbe(params: {
@@ -618,17 +635,36 @@ function writePluginFixtures(
   root: string,
   count: number,
   activationOnStartup?: boolean,
+  providerCatalogStallMs?: number,
 ): PluginFixtureResult {
   const pluginIds: string[] = [];
   const pluginsDir = path.join(root, "plugins");
   mkdirSync(pluginsDir, { recursive: true });
   for (let index = 0; index < count; index += 1) {
     const id = `bench-plugin-${String(index + 1).padStart(2, "0")}`;
+    const stallsProviderCatalog = providerCatalogStallMs !== undefined && index === 0;
     pluginIds.push(id);
     const pluginDir = path.join(pluginsDir, id);
     mkdirSync(pluginDir, { recursive: true });
     const entry = path.join(pluginDir, "index.cjs");
-    writeFileSync(entry, `module.exports = { id: ${JSON.stringify(id)}, register() {} };\n`);
+    const model = {
+      id: STALLED_CATALOG_MODEL_ID,
+      name: "Benchmark Model",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 8_192,
+    };
+    const provider = {
+      baseUrl: "http://127.0.0.1:1/v1",
+      api: "openai-completions",
+      models: [model],
+    };
+    const entrySource = stallsProviderCatalog
+      ? `const provider = ${JSON.stringify(provider)};\nmodule.exports = { id: ${JSON.stringify(id)}, register(api) { api.registerProvider({ id: ${JSON.stringify(STALLED_CATALOG_PROVIDER_ID)}, label: "Benchmark Catalog Stall", auth: [], catalog: { order: "simple", run: async () => { const stopAt = Date.now() + ${providerCatalogStallMs}; while (Date.now() < stopAt) {} return { provider }; } }, staticCatalog: { order: "simple", run: async () => ({ provider }) } }); } };\n`
+      : `module.exports = { id: ${JSON.stringify(id)}, register() {} };\n`;
+    writeFileSync(entry, entrySource);
     writeFileSync(
       path.join(pluginDir, "openclaw.plugin.json"),
       `${JSON.stringify(
@@ -637,6 +673,14 @@ function writePluginFixtures(
           ...(activationOnStartup === undefined
             ? {}
             : { activation: { onStartup: activationOnStartup } }),
+          ...(stallsProviderCatalog
+            ? {
+                providers: [STALLED_CATALOG_PROVIDER_ID],
+                modelCatalog: {
+                  providers: { [STALLED_CATALOG_PROVIDER_ID]: provider },
+                },
+              }
+            : {}),
           configSchema: { type: "object", additionalProperties: false },
         },
         null,
@@ -648,8 +692,14 @@ function writePluginFixtures(
 }
 
 function writeConfig(root: string, benchCase: GatewayBenchCase): string {
-  const pluginFixtures = benchCase.pluginCount
-    ? writePluginFixtures(root, benchCase.pluginCount, benchCase.pluginActivationOnStartup)
+  const pluginCount = benchCase.providerCatalogStallMs === undefined ? benchCase.pluginCount : 1;
+  const pluginFixtures = pluginCount
+    ? writePluginFixtures(
+        root,
+        pluginCount,
+        benchCase.providerCatalogStallMs === undefined ? benchCase.pluginActivationOnStartup : true,
+        benchCase.providerCatalogStallMs,
+      )
     : null;
   const config = {
     ...benchCase.config,
@@ -684,7 +734,6 @@ function sanitizedEnv(
     TMPDIR: process.env.TMPDIR,
     USER: process.env.USER ?? "openclaw-bench",
     npm_config_update_notifier: "false",
-    OPENCLAW_CONFIG: configPath,
     OPENCLAW_CONFIG_PATH: configPath,
     OPENCLAW_GATEWAY_STARTUP_TRACE: "1",
     OPENCLAW_HOME: root,
@@ -939,15 +988,12 @@ function printResult(result: CaseResult): void {
   console.log(`  /readyz:      ${formatStats(result.summary.readyzMs)}`);
   console.log(`  max RSS:      ${formatMemoryStats(result.summary.maxRssMb)}`);
   console.log(
-    `  ready memory: rss=${formatMemoryStats(getStartupTraceStat(result.summary.startupTrace, "memory.ready.rssMb"))} heap=${formatMemoryStats(getStartupTraceStat(result.summary.startupTrace, "memory.ready.heapUsedMb"))} external=${formatMemoryStats(getStartupTraceStat(result.summary.startupTrace, "memory.ready.externalMb"))}`,
+    `  ready memory: rss=${formatMemoryStats(result.summary.startupTrace["memory.ready.rssMb"])} heap=${formatMemoryStats(result.summary.startupTrace["memory.ready.heapUsedMb"])} external=${formatMemoryStats(result.summary.startupTrace["memory.ready.externalMb"])}`,
   );
   console.log(
-    `  post-ready memory: rss=${formatMemoryStats(getStartupTraceStat(result.summary.startupTrace, "memory.post-ready.rssMb"))} heap=${formatMemoryStats(getStartupTraceStat(result.summary.startupTrace, "memory.post-ready.heapUsedMb"))} external=${formatMemoryStats(getStartupTraceStat(result.summary.startupTrace, "memory.post-ready.externalMb"))}`,
+    `  post-ready memory: rss=${formatMemoryStats(result.summary.startupTrace["memory.post-ready.rssMb"])} heap=${formatMemoryStats(result.summary.startupTrace["memory.post-ready.heapUsedMb"])} external=${formatMemoryStats(result.summary.startupTrace["memory.post-ready.externalMb"])}`,
   );
-  const trace = Object.entries(result.summary.startupTrace)
-    .filter(([name]) => !name.endsWith(".total") && !name.startsWith("memory."))
-    .toSorted((a, b) => (b[1].avg ?? 0) - (a[1].avg ?? 0))
-    .slice(0, 8);
+  const trace = selectSlowStartupTraceDurations(result.summary.startupTrace, 8);
   if (trace.length > 0) {
     console.log("  trace top:");
     for (const [name, stats] of trace) {
@@ -1033,4 +1079,3 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
     process.exitCode = 1;
   });
 }
-export { testing as __testing };

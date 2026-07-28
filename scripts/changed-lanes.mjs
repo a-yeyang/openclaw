@@ -1,11 +1,9 @@
-// Classifies changed files into CI lanes and release metadata scopes.
 import { execFileSync } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { booleanFlag, parseFlagArgs, stringFlag } from "./lib/arg-utils.mjs";
 import { getChangedPathFacts, normalizeChangedPath } from "./lib/changed-path-facts.mjs";
 import { isDirectRunUrl } from "./lib/direct-run.mjs";
 import { resolveMergeHeadDiffBase } from "./lib/merge-head-diff-base.mjs";
-export { normalizeChangedPath } from "./lib/changed-path-facts.mjs";
 
 const GIT_OUTPUT_MAX_BUFFER = 64 * 1024 * 1024;
 const IMPLAUSIBLE_NO_MERGE_BASE_DIFF_PATHS = 200;
@@ -15,6 +13,7 @@ const SCRIPTS_TYPECHECK_PATH_RE =
   /^(?:scripts\/.*\.(?:[cm]?ts|[cm]?tsx)|tsconfig\.scripts\.json)$/u;
 const TEST_ROOT_TYPECHECK_PATH_RE =
   /^(?:test\/(?!fixtures\/).*\.(?:[cm]?ts|[cm]?tsx)|test\/tsconfig\/tsconfig\.test\.root\.json)$/u;
+/** @internal Shared repository-script contract. */
 export const LIVE_DOCKER_AUTH_SHELL_TARGETS = [
   "scripts/lib/live-docker-auth.sh",
   "scripts/test-live-acp-bind-docker.sh",
@@ -33,8 +32,11 @@ const LIVE_DOCKER_TOOLING_PATHS = new Set([
 const LIVE_DOCKER_PACKAGE_SCRIPT_RE = /^test:docker:live-[\w:-]+$/u;
 const PUBLIC_EXTENSION_CONTRACT_RE =
   /^(?:src\/plugin-sdk\/|src\/plugins\/contracts\/|src\/channels\/plugins\/|scripts\/lib\/plugin-sdk-entrypoints\.json$|scripts\/sync-plugin-sdk-exports\.mjs$|scripts\/generate-plugin-sdk-api-baseline\.ts$)/u;
+const BUNDLED_CHANNEL_CONFIG_METADATA_PATH_RE =
+  /^(?:src\/config\/(?:bundled-channel-config-metadata\.generated|zod-schema\.[^/]+)\.ts|src\/channels\/plugins\/config-schema\.ts|src\/plugin-sdk\/(?:bundled-channel-config-schema|channel-config-schema)\.ts|src\/plugins\/(?:bundled-dir|public-surface-loader|public-surface-runtime|sdk-alias)\.ts|scripts\/(?:generate-bundled-channel-config-metadata\.ts|load-channel-config-surface\.ts|lib\/(?:bundled-plugin-source-utils|format-generated-module|generated-output-utils)\.mjs)|extensions\/[^/]+\/(?:openclaw\.plugin\.json|package\.json|(?:config|security-contract)-api\.[cm]?[jt]sx?|src\/config-(?:schema(?:-[^/]+)?|surface|ui-hints)\.[cm]?[jt]sx?))$/u;
 /**
  * Files whose changes are treated as release metadata only.
+ * @internal Shared repository-script contract.
  */
 export const RELEASE_METADATA_PATHS = new Set([
   "CHANGELOG.md",
@@ -44,12 +46,13 @@ export const RELEASE_METADATA_PATHS = new Set([
   "apps/android/version.json",
   "apps/ios/CHANGELOG.md",
   "apps/macos/Sources/OpenClaw/Resources/Info.plist",
+  "docs/.generated/config-baseline.counts.json",
   "docs/.generated/config-baseline.sha256",
   "docs/install/updating.md",
   "package.json",
 ]);
 
-/** @typedef {"core" | "coreTests" | "ui" | "extensions" | "extensionTests" | "scripts" | "testRoot" | "apps" | "docs" | "tooling" | "liveDockerTooling" | "releaseMetadata" | "all"} ChangedLane */
+/** @typedef {"core" | "coreTests" | "ui" | "extensions" | "extensionTests" | "scripts" | "testRoot" | "apps" | "docs" | "tooling" | "liveDockerTooling" | "bundledChannelConfigMetadata" | "releaseMetadata" | "all"} ChangedLane */
 
 /**
  * @typedef {{
@@ -63,6 +66,7 @@ export const RELEASE_METADATA_PATHS = new Set([
 
 /**
  * Creates the default changed-lanes result object.
+ * @internal Directly tested script implementation detail.
  */
 export function createEmptyChangedLanes() {
   return {
@@ -77,6 +81,7 @@ export function createEmptyChangedLanes() {
     docs: false,
     tooling: false,
     liveDockerTooling: false,
+    bundledChannelConfigMetadata: false,
     releaseMetadata: false,
     all: false,
   };
@@ -87,12 +92,8 @@ export function isChangedLaneTestPath(changedPath) {
 }
 
 /**
- * @param {string[]} changedPaths
- * @param {{ packageJsonChangeKind?: "liveDockerTooling" | "tooling" | null }} [options]
- * @returns {ChangedLaneResult}
- */
-/**
  * Classifies a list of changed paths into docs, app, extension, core, and tooling lanes.
+ * @internal Shared repository-script contract.
  */
 export function detectChangedLanes(changedPaths, options = {}) {
   const paths = [...new Set(changedPaths.map(normalizeChangedPath).filter(Boolean))]
@@ -128,6 +129,10 @@ export function detectChangedLanes(changedPaths, options = {}) {
 
   for (const changedPath of paths) {
     const facts = getChangedPathFacts(changedPath);
+    if (BUNDLED_CHANNEL_CONFIG_METADATA_PATH_RE.test(changedPath)) {
+      lanes.bundledChannelConfigMetadata = true;
+      reasons.push(`${changedPath}: bundled channel config metadata input`);
+    }
     if (SCRIPTS_TYPECHECK_PATH_RE.test(changedPath)) {
       lanes.scripts = true;
     }
@@ -252,11 +257,8 @@ export function detectChangedLanes(changedPaths, options = {}) {
 }
 
 /**
- * @param {{ paths: string[]; base: string; head?: string; staged?: boolean; mergeHeadFirstParent?: boolean }} params
- * @returns {ChangedLaneResult}
- */
-/**
  * Classifies changed paths with optional package.json before/after contents.
+ * @internal Shared repository-script contract.
  */
 export function detectChangedLanesForPaths(params) {
   const base = params.staged
@@ -277,10 +279,6 @@ export function detectChangedLanesForPaths(params) {
   return detectChangedLanes(params.paths, { packageJsonChangeKind });
 }
 
-/**
- * @param {{ base: string; head?: string; includeWorktree?: boolean; cwd?: string; mergeHeadFirstParent?: boolean }} params
- * @returns {string[]}
- */
 /**
  * Lists changed paths from git for a base/head comparison.
  */
@@ -394,6 +392,7 @@ function classifyPackageJsonChangeFromGit(params) {
 
 /**
  * Checks whether package scripts changed only live Docker script entries.
+ * @internal Directly tested script implementation detail.
  */
 export function isLiveDockerPackageScriptOnlyChange(before, after) {
   const beforePackage = JSON.parse(before);
@@ -411,6 +410,7 @@ export function isLiveDockerPackageScriptOnlyChange(before, after) {
 
 /**
  * Checks whether package.json changes are limited to scripts.
+ * @internal Directly tested script implementation detail.
  */
 export function isPackageScriptOnlyChange(before, after) {
   const beforePackage = JSON.parse(before);
