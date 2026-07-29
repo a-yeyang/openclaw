@@ -22,13 +22,11 @@ function probeDirectoryEntry(dir: string, name: string): boolean | undefined {
   try {
     const names = fs.readdirSync(dir);
     if (names.includes(name) && names.includes(swapped)) {
-      // Two exact case variants can coexist only when lookup is case-sensitive.
       return false;
     }
     const original = fs.lstatSync(path.join(dir, name));
     try {
-      const alternate = fs.lstatSync(path.join(dir, swapped));
-      return sameFsObject(original, alternate);
+      return sameFsObject(original, fs.lstatSync(path.join(dir, swapped)));
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       return code === "ENOENT" || code === "ENOTDIR" ? false : undefined;
@@ -39,17 +37,15 @@ function probeDirectoryEntry(dir: string, name: string): boolean | undefined {
 }
 
 function probeDirectoryContents(dir: string): boolean | undefined {
-  let names: string[];
   try {
-    names = fs.readdirSync(dir);
+    for (const name of fs.readdirSync(dir)) {
+      const result = probeDirectoryEntry(dir, name);
+      if (result !== undefined) {
+        return result;
+      }
+    }
   } catch {
     return undefined;
-  }
-  for (const name of names) {
-    const result = probeDirectoryEntry(dir, name);
-    if (result !== undefined) {
-      return result;
-    }
   }
   return undefined;
 }
@@ -60,8 +56,6 @@ function probeDirectoryWithTemporaryEntry(dir: string): boolean | undefined {
   let created = false;
   let result: boolean | undefined;
   try {
-    // An empty directory has no read-only lookup evidence. Use one exclusive,
-    // zero-byte entry and remove it before config validation can continue.
     fs.writeFileSync(probePath, "", { flag: "wx", mode: 0o600 });
     created = true;
     result = probeDirectoryEntry(dir, name);
@@ -80,8 +74,12 @@ function probeDirectoryWithTemporaryEntry(dir: string): boolean | undefined {
   return result;
 }
 
-function defaultPathCaseInsensitive(): boolean {
+function platformDefault(): boolean {
   return process.platform === "darwin" || process.platform === "win32";
+}
+
+function probeDirectory(dir: string): boolean {
+  return probeDirectoryContents(dir) ?? probeDirectoryWithTemporaryEntry(dir) ?? platformDefault();
 }
 
 /** Returns whether the target path's filesystem matches names case-insensitively. */
@@ -90,38 +88,26 @@ export function isPathCaseInsensitive(value: string): boolean {
   try {
     fs.lstatSync(resolved);
     const parent = path.dirname(resolved);
-    return (
-      probeDirectoryEntry(parent, path.basename(resolved)) ??
-      probeDirectoryContents(parent) ??
-      probeDirectoryWithTemporaryEntry(parent) ??
-      defaultPathCaseInsensitive()
-    );
+    return probeDirectoryEntry(parent, path.basename(resolved)) ?? probeDirectory(parent);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ENOENT" && code !== "ENOTDIR") {
-      return defaultPathCaseInsensitive();
+      return platformDefault();
     }
   }
 
   let candidate = path.dirname(resolved);
   for (;;) {
     try {
-      const stat = fs.statSync(candidate);
-      if (stat.isDirectory()) {
-        // The missing entry will be created inside this directory, so probe
-        // lookup within it rather than the mount point's name in its parent.
-        return (
-          probeDirectoryContents(candidate) ??
-          probeDirectoryWithTemporaryEntry(candidate) ??
-          defaultPathCaseInsensitive()
-        );
+      if (fs.statSync(candidate).isDirectory()) {
+        return probeDirectory(candidate);
       }
     } catch {
       // Keep walking to the nearest readable existing directory.
     }
     const parent = path.dirname(candidate);
     if (parent === candidate) {
-      return defaultPathCaseInsensitive();
+      return platformDefault();
     }
     candidate = parent;
   }

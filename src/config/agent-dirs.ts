@@ -1,5 +1,5 @@
-// Resolves agent-specific config and workspace directories.
 import fs from "node:fs";
+// Resolves agent-specific config and workspace directories.
 import os from "node:os";
 import path from "node:path";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
@@ -49,7 +49,7 @@ function realpathAgentDir(agentDir: string, seen = new Set<string>()): string {
           return realpathAgentDir(path.join(target, ...missingSegments.toReversed()), seen);
         }
       } catch {
-        // This component is genuinely missing; continue with its parent.
+        // This component is missing; continue with its parent.
       }
       const parent = path.dirname(cursor);
       if (parent === cursor) {
@@ -63,8 +63,6 @@ function realpathAgentDir(agentDir: string, seen = new Set<string>()): string {
 
 function canonicalizeAgentDir(agentDir: string): string {
   const resolved = realpathAgentDir(agentDir);
-  // Case semantics belong to the target volume, not the host OS. Probing the
-  // nearest existing parent also covers configured directories not created yet.
   return isPathCaseInsensitive(resolved) ? normalizeLowercaseStringOrEmpty(resolved) : resolved;
 }
 
